@@ -1,3 +1,4 @@
+from typing import Optional
 """
 renderer.py
 Renders a 1152×1080 branded dashboard PNG from parsed leaderboard data.
@@ -70,7 +71,7 @@ def _draw_right(draw, rx, y, text, font, fill):
     draw.text((rx - w, y), text, font=font, fill=fill)
 
 
-def _pct_value(s: str) -> float | None:
+def _pct_value(s: str) -> Optional[float]:
     """Extract numeric percentage from a string like '126.8%' or '88.0%'."""
     m = re.search(r"([\d.]+)%", str(s))
     return float(m.group(1)) if m else None
@@ -374,7 +375,7 @@ def _draw_footer(draw: ImageDraw.Draw, cfg: dict, W: int, y_top: int, H: int):
 # Public API
 # ---------------------------------------------------------------------------
 
-def render(data: dict, cfg: dict, output_path: str | None = None) -> str:
+def render(data: dict, cfg: dict, output_path: Optional[str] = None) -> str:
     """
     Render the 1152×1080 branded dashboard PNG.
     Returns path to saved file.

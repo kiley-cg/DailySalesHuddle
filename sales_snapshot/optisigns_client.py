@@ -1,3 +1,4 @@
+from typing import Optional
 """
 optisigns_client.py
 Uploads a PNG to OptiSigns, assigns it to the Main Left zone of the
@@ -36,7 +37,7 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
 
-def _gql(query: str, variables: dict | None = None) -> dict:
+def _gql(query: str, variables: Optional[dict] = None) -> dict:
     """Execute a GraphQL request with retry/backoff."""
     payload = {"query": query}
     if variables:

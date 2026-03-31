@@ -1,3 +1,4 @@
+from typing import Optional
 """
 gmail_watcher.py
 Polls Gmail for the daily Atease leaderboard email and returns its HTML body.
@@ -100,7 +101,7 @@ def build_query(cfg: dict) -> str:
     return " ".join(parts)
 
 
-def extract_html_body(service, message_id: str) -> str | None:
+def extract_html_body(service, message_id: str) -> Optional[str]:
     """Return the HTML body of a Gmail message, or None if not found."""
     try:
         msg = service.users().messages().get(
@@ -125,7 +126,7 @@ def extract_html_body(service, message_id: str) -> str | None:
     return _walk(msg.get("payload", {}))
 
 
-def poll_once(cfg: dict, service, db_conn) -> str | None:
+def poll_once(cfg: dict, service, db_conn) -> Optional[str]:
     """
     Check Gmail for a new matching email.
     Returns the HTML body string if found and unprocessed, else None.

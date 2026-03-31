@@ -1,3 +1,4 @@
+from typing import Optional, Tuple
 """
 table_parser.py
 Parses the Color Graphics Daily Leaderboard email from Atease Systems.
@@ -36,7 +37,7 @@ def _clean(value: str) -> str:
     return re.sub(r"\s+", " ", value.replace("\xa0", " ").replace("&nbsp;", " ")).strip()
 
 
-def _find_img_indicator(cell: Tag) -> bool | None:
+def _find_img_indicator(cell: Tag) -> Optional[bool]:
     """
     Return True if the cell contains table_ontarget.gif,
     False if table_offtarget.gif, None if no indicator found.
@@ -52,7 +53,7 @@ def _find_img_indicator(cell: Tag) -> bool | None:
     return None
 
 
-def _find_img_and_text(cell: Tag) -> tuple[bool | None, str]:
+def _find_img_and_text(cell: Tag) -> Tuple[Optional[bool], str]:
     """
     Return (on_target_flag, dollar_text) from a MTD Target cell.
     The Atease email puts an indicator image AND a dollar value in this cell.
@@ -202,7 +203,7 @@ _COL_PATTERNS = {
 }
 
 
-def _find_targets_table(soup: BeautifulSoup) -> Tag | None:
+def _find_targets_table(soup: BeautifulSoup) -> Optional[Tag]:
     """
     Locate the Sales Targets table by looking for a table that contains
     at least 3 of the expected column headers.
@@ -321,7 +322,7 @@ def parse(html_body: str) -> dict:
             {
                 "Sales Rep": str,
                 "Monthly Target": str,
-                "MTD Target": bool | None,   # True=on target, False=behind
+                "MTD Target": str,  # dollar value e.g. "$125,806"
                 "Booked Sales": str,
                 "% of Target": str,
                 "Submitted Sales": str,
