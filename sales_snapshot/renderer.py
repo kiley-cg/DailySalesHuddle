@@ -1,11 +1,10 @@
 """
 renderer.py
 Renders a 1152×1080 branded dashboard PNG from parsed leaderboard data.
+Matches the Color Graphics Daily Sales Leaderboard design reference.
 """
 
 import logging
-import math
-import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -15,40 +14,34 @@ from PIL import Image, ImageDraw, ImageFont
 
 log = logging.getLogger(__name__)
 
+
 # ---------------------------------------------------------------------------
 # Color helpers
 # ---------------------------------------------------------------------------
 
 def _hex(color: str) -> tuple:
-    """Convert '#RRGGBB' to (R, G, B)."""
     color = color.lstrip("#")
     return tuple(int(color[i : i + 2], 16) for i in (0, 2, 4))
 
 
 def _hex_a(color: str, alpha: int = 255) -> tuple:
-    """Return (R, G, B, A) from hex."""
     return _hex(color) + (alpha,)
 
 
-def _rgba_str(css: str) -> tuple:
-    """Parse 'rgba(255,255,255,0.7)' → (R,G,B,A 0-255)."""
-    m = re.match(r"rgba\((\d+),\s*(\d+),\s*(\d+),\s*([\d.]+)\)", css)
-    if m:
-        r, g, b = int(m[1]), int(m[2]), int(m[3])
-        a = int(float(m[4]) * 255)
-        return (r, g, b, a)
-    return _hex_a(css)
+def _muted(alpha: int = 178) -> tuple:
+    """rgba(255,255,255,0.7) → (255,255,255,178)"""
+    return (255, 255, 255, alpha)
 
 
 # ---------------------------------------------------------------------------
 # Font loader
 # ---------------------------------------------------------------------------
 
-def _load_font(path: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
     try:
         return ImageFont.truetype(path, size)
     except (OSError, IOError):
-        log.warning("Font not found at %s — using default.", path)
+        log.warning("Font not found: %s — using default.", path)
         return ImageFont.load_default()
 
 
@@ -56,297 +49,325 @@ def _load_font(path: str, size: int) -> ImageFont.FreeTypeFont | ImageFont.Image
 # Draw helpers
 # ---------------------------------------------------------------------------
 
-def _rounded_rect(draw: ImageDraw.Draw, xy, radius: int, fill):
-    """Draw a rounded rectangle."""
-    x0, y0, x1, y1 = xy
-    r = radius
-    draw.rectangle([x0 + r, y0, x1 - r, y1], fill=fill)
-    draw.rectangle([x0, y0 + r, x1, y1 - r], fill=fill)
-    draw.ellipse([x0, y0, x0 + 2 * r, y0 + 2 * r], fill=fill)
-    draw.ellipse([x1 - 2 * r, y0, x1, y0 + 2 * r], fill=fill)
-    draw.ellipse([x0, y1 - 2 * r, x0 + 2 * r, y1], fill=fill)
-    draw.ellipse([x1 - 2 * r, y1 - 2 * r, x1, y1], fill=fill)
+def _tw(draw, text, font) -> int:
+    """Text width in pixels."""
+    bb = draw.textbbox((0, 0), text, font=font)
+    return bb[2] - bb[0]
 
 
-def _text_bbox(draw, text, font):
-    """Return (width, height) of rendered text."""
-    bbox = draw.textbbox((0, 0), text, font=font)
-    return bbox[2] - bbox[0], bbox[3] - bbox[1]
+def _th(draw, text, font) -> int:
+    bb = draw.textbbox((0, 0), text, font=font)
+    return bb[3] - bb[1]
 
 
-def _draw_text_right(draw, x_right, y, text, font, fill):
-    """Draw text right-aligned to x_right."""
-    w, _ = _text_bbox(draw, text, font)
-    draw.text((x_right - w, y), text, font=font, fill=fill)
+def _draw_centered(draw, cx, y, text, font, fill):
+    w = _tw(draw, text, font)
+    draw.text((cx - w // 2, y), text, font=font, fill=fill)
+
+
+def _draw_right(draw, rx, y, text, font, fill):
+    w = _tw(draw, text, font)
+    draw.text((rx - w, y), text, font=font, fill=fill)
+
+
+def _pct_value(s: str) -> float | None:
+    """Extract numeric percentage from a string like '126.8%' or '88.0%'."""
+    m = re.search(r"([\d.]+)%", str(s))
+    return float(m.group(1)) if m else None
+
+
+def _is_dollar(s: str) -> bool:
+    return bool(re.match(r"^\$[\d,. ]+$", str(s).strip()))
 
 
 # ---------------------------------------------------------------------------
-# Section renderers
+# Section 1 — Header
 # ---------------------------------------------------------------------------
 
-def _draw_header(img: Image.Image, draw: ImageDraw.Draw, cfg: dict, W: int, now: datetime):
+def _draw_header(img: Image.Image, draw: ImageDraw.Draw, cfg: dict, W: int, now: datetime) -> int:
     brand = cfg["brand"]
-    header_h = 90
+    H_HDR = 68
 
-    # Header background
-    draw.rectangle([0, 0, W, header_h], fill=_hex(brand["background_header"]))
+    draw.rectangle([0, 0, W, H_HDR], fill=_hex(brand["background_header"]))
 
-    # Logo
-    logo_path = cfg.get("logo_path", "assets/CG_Primary.png")
-    logo_y_center = header_h // 2
-    logo_target_h = 56
+    # Logo — top-left, height 44px
+    logo_h = 44
     try:
-        logo = Image.open(logo_path).convert("RGBA")
-        aspect = logo.width / logo.height
-        logo_w = int(logo_target_h * aspect)
-        logo = logo.resize((logo_w, logo_target_h), Image.LANCZOS)
-        logo_y = logo_y_center - logo_target_h // 2
-        img.paste(logo, (24, logo_y), logo)
-    except (OSError, FileNotFoundError):
-        log.warning("Logo not found at %s", logo_path)
+        logo = Image.open(cfg.get("logo_path", "assets/CG_Primary.png")).convert("RGBA")
+        lw = int(logo_h * logo.width / logo.height)
+        logo = logo.resize((lw, logo_h), Image.LANCZOS)
+        img.paste(logo, (14, (H_HDR - logo_h) // 2), logo)
+    except Exception:
+        log.warning("Logo not found.")
 
-    # Right side text
-    font_title = _load_font(brand["font_bold"], 22)
-    font_sub = _load_font(brand.get("font_regular", brand["font_bold"]), 11)
-    date_str = now.strftime("%A, %B %-d, %Y")
-    time_str = now.strftime("Updated %-I:%M %p")
-    muted = _rgba_str("rgba(255,255,255,0.7)")
-    _draw_text_right(draw, W - 24, 22, "Sales Huddle", font_title, _hex(brand["text_white"]))
-    _draw_text_right(draw, W - 24, 48, date_str, font_sub, muted)
-    _draw_text_right(draw, W - 24, 62, time_str, font_sub, muted)
+    # Title — top-right
+    f_title = _font(brand["font_bold"], 24)
+    f_date  = _font(brand.get("font_regular", brand["font_bold"]), 11)
+    date_str = now.strftime("%A, %B %-d, %Y") + now.strftime("  •  %-I:%M %p")
+    _draw_right(draw, W - 20, 12, "Daily Sales Leaderboard", f_title, _hex(brand["text_white"]))
+    _draw_right(draw, W - 20, 42, date_str, f_date, _muted())
 
-    # Bottom border: 3px red + 4px teal
-    draw.rectangle([0, header_h - 7, W, header_h - 4], fill=_hex(brand["cg_red"]))
-    draw.rectangle([0, header_h - 4, W, header_h], fill=_hex(brand["cg_teal"]))
+    # Bottom border: 4px red + 3px teal
+    draw.rectangle([0, H_HDR - 7, W, H_HDR - 3], fill=_hex(brand["cg_red"]))
+    draw.rectangle([0, H_HDR - 3, W, H_HDR],     fill=_hex(brand["cg_teal"]))
 
-    return header_h
+    return H_HDR
 
 
-def _draw_metric_cards(
-    draw: ImageDraw.Draw,
-    cfg: dict,
-    W: int,
-    y_start: int,
-    metrics: dict,
-) -> int:
+# ---------------------------------------------------------------------------
+# Section 2 — YTD Cards (3 full-width red cards)
+# ---------------------------------------------------------------------------
+
+def _draw_ytd_cards(draw: ImageDraw.Draw, cfg: dict, W: int, y: int, ytd: dict) -> int:
     brand = cfg["brand"]
-    card_h = 110
-    margin = 16
-    gap = 10
-    card_w = (W - 2 * margin - 2 * gap) // 3
-    y = y_start + 12
+    PAD = 14
+    GAP = 6
+    H_CARD = 108
+    card_w = (W - 2 * PAD - 2 * GAP) // 3
 
-    ytd = metrics.get("ytd", {})
-    kpi = metrics.get("kpi", {})
+    cards = [
+        ("SALES YTD",      ytd.get("Sales YTD",      "—")),
+        ("YTD GROWTH",     ytd.get("Growth",          "—")),
+        ("PRIOR YEAR YTD", ytd.get("Prior Year YTD",  "—")),
+    ]
 
-    card_data = [
+    f_label = _font(brand.get("font_semibold", brand["font_bold"]), 11)
+    f_value = _font(brand["font_bold"], 36)
+
+    y0 = y + 10
+    for i, (label, value) in enumerate(cards):
+        x0 = PAD + i * (card_w + GAP)
+        x1 = x0 + card_w
+        cx = (x0 + x1) // 2
+
+        draw.rectangle([x0, y0, x1, y0 + H_CARD], fill=_hex(brand["cg_red"]))
+
+        # Label centered, muted
+        lw = _tw(draw, label, f_label)
+        draw.text((cx - lw // 2, y0 + 14), label, font=f_label, fill=_muted(200))
+
+        # Value centered, white bold
+        vw = _tw(draw, value, f_value)
+        draw.text((cx - vw // 2, y0 + 34), value, font=f_value, fill=_hex(brand["text_white"]))
+
+        # Vertical divider (right edge of card 0 and 1)
+        if i < 2:
+            draw.rectangle([x1 + 1, y0, x1 + GAP - 1, y0 + H_CARD], fill=_hex(brand["background_main"]))
+
+    return y0 + H_CARD + 10
+
+
+# ---------------------------------------------------------------------------
+# Section 3 — KPI Row (4 panels, each with Today + MTD rows)
+# ---------------------------------------------------------------------------
+
+def _draw_kpi_row(draw: ImageDraw.Draw, cfg: dict, W: int, y: int, kpi: dict) -> int:
+    brand = cfg["brand"]
+    PAD = 14
+    GAP = 0          # panels share a divider line
+    H_KPI = 78
+    panel_w = (W - 2 * PAD) // 4
+
+    # Map kpi keys from parser to display labels
+    panels = [
         {
-            "label": "SALES YTD",
-            "value": ytd.get("Sales YTD", "—"),
-            "delta": f"vs {ytd.get('Prior Year YTD', '—')} prior year",
-            "delta_color": _hex(brand["accent_teal"]),
-            "border_color": brand["cg_red"],
+            "today_label": "SALES TODAY",
+            "today_value": kpi.get("Sales Today", kpi.get("Sales/MTD", "—")),
+            "mtd_label":   "SALES MTD",
+            "mtd_value":   kpi.get("Sales/MTD", "—"),
         },
         {
-            "label": "SALES / MTD",
-            "value": kpi.get("Sales/MTD", "—"),
-            "delta": f"Calls: {kpi.get('Calls/MTD', '—')}",
-            "delta_color": _hex(brand["accent_teal"]),
-            "border_color": brand["cg_teal"],
+            "today_label": "CALLS TODAY",
+            "today_value": kpi.get("Calls Today", kpi.get("Calls/MTD", "—")),
+            "mtd_label":   "CALLS MTD",
+            "mtd_value":   kpi.get("Calls/MTD", "—"),
         },
         {
-            "label": "VICTORIES / OPPS",
-            "value": kpi.get("Victories/MTD", "—"),
-            "delta": f"Opps: {kpi.get('Opportunities/MTD', '—')}",
-            "delta_color": _hex(brand["accent_teal"]),
-            "border_color": brand["cg_teal"],
+            "today_label": "VICTORIES TODAY",
+            "today_value": kpi.get("Victories Today", kpi.get("Victories/MTD", "—")),
+            "mtd_label":   "VICTORIES MTD",
+            "mtd_value":   kpi.get("Victories/MTD", "—"),
+        },
+        {
+            "today_label": "OPPS TODAY",
+            "today_value": kpi.get("Opps Today", kpi.get("Opportunities/MTD", "—")),
+            "mtd_label":   "OPPS MTD (WTD)",
+            "mtd_value":   kpi.get("Opportunities/MTD", "—"),
         },
     ]
 
-    font_label = _load_font(brand.get("font_semibold", brand["font_bold"]), 10)
-    font_value = _load_font(brand["font_bold"], 30)
-    font_delta = _load_font(brand.get("font_regular", brand["font_bold"]), 10)
-    muted = _rgba_str("rgba(255,255,255,0.7)")
+    f_label = _font(brand.get("font_regular", brand["font_bold"]), 10)
+    f_today = _font(brand["font_bold"], 18)
+    f_mtd   = _font(brand["font_bold"], 13)
 
-    for i, card in enumerate(card_data):
-        x0 = margin + i * (card_w + gap)
-        x1 = x0 + card_w
-        _rounded_rect(draw, (x0, y, x1, y + card_h), radius=6, fill=_hex(brand["background_cards"]))
-        # Left border
-        draw.rectangle([x0, y, x0 + 3, y + card_h], fill=_hex(card["border_color"]))
+    bg = _hex(brand.get("background_cards", "#686868"))
+    draw.rectangle([PAD, y, W - PAD, y + H_KPI], fill=bg)
 
-        # Label (ALL-CAPS, muted, 10px)
-        draw.text((x0 + 12, y + 10), card["label"], font=font_label, fill=muted)
-        # Value (white, 30px bold)
-        draw.text((x0 + 12, y + 26), card["value"], font=font_value, fill=_hex(brand["text_white"]))
-        # Delta (teal, 10px)
-        draw.text((x0 + 12, y + 82), card["delta"], font=font_delta, fill=card["delta_color"])
+    for i, panel in enumerate(panels):
+        x0 = PAD + i * panel_w
+        x1 = x0 + panel_w
 
-        # Growth badge on first card
-        if i == 0:
-            growth = ytd.get("Growth", "")
-            if growth:
-                draw.text((x0 + 12, y + 96), f"Growth: {growth}", font=font_delta, fill=muted)
+        # Vertical divider
+        if i > 0:
+            draw.rectangle([x0, y + 8, x0 + 1, y + H_KPI - 8],
+                           fill=_hex(brand["md_gray"]) + (80,) if False else _muted(60))
 
-    return y + card_h + 12
+        # Today row
+        draw.text((x0 + 10, y + 10), panel["today_label"], font=f_label, fill=_muted(160))
+        _draw_right(draw, x1 - 10, y + 8, str(panel["today_value"]),
+                    f_today, _hex(brand["text_white"]))
+
+        # Divider line within panel
+        draw.rectangle([x0 + 8, y + H_KPI // 2, x1 - 8, y + H_KPI // 2 + 1],
+                       fill=_muted(40))
+
+        # MTD row
+        draw.text((x0 + 10, y + H_KPI // 2 + 5), panel["mtd_label"], font=f_label, fill=_muted(160))
+        _draw_right(draw, x1 - 10, y + H_KPI // 2 + 3, str(panel["mtd_value"]),
+                    f_mtd, _hex(brand["accent_teal"]))
+
+    return y + H_KPI + 10
 
 
-def _draw_table(
-    draw: ImageDraw.Draw,
-    cfg: dict,
-    W: int,
-    y_start: int,
-    H: int,
-    headers: list,
-    rows: list,
-) -> int:
+# ---------------------------------------------------------------------------
+# Section 4 — Sales Targets Table
+# ---------------------------------------------------------------------------
+
+def _draw_table(draw: ImageDraw.Draw, cfg: dict, W: int, y: int, H: int,
+                headers: list, rows: list) -> int:
     brand = cfg["brand"]
-    margin = 16
-    table_w = W - 2 * margin
+    PAD = 14
 
     # Section label
-    font_section = _load_font(brand.get("font_semibold", brand["font_bold"]), 10)
-    muted = _rgba_str("rgba(255,255,255,0.7)")
-    draw.text((margin, y_start), "SALES TARGETS — MONTH TO DATE", font=font_section, fill=muted)
-    y = y_start + 18
+    f_sec = _font(brand.get("font_semibold", brand["font_bold"]), 10)
+    draw.text((PAD, y), "SALES TARGETS — BREAKDOWN BY REP", font=f_sec, fill=_muted(160))
+    y += 20
 
-    # Auto-scale font size based on row count
-    n_rows = len(rows)
-    if n_rows <= 8:
-        font_size = 14
-    elif n_rows <= 12:
-        font_size = 12
-    else:
-        font_size = max(10, 14 - (n_rows - 8) // 2)
+    table_w = W - 2 * PAD
 
-    font_header = _load_font(brand["font_bold"], 11)
-    font_cell = _load_font(brand.get("font_regular", brand["font_bold"]), font_size)
-    font_cell_bold = _load_font(brand["font_bold"], font_size)
+    # Auto-scale row font
+    n = len(rows)
+    available_h = H - y - 7 - 35  # pattern strip + footer
+    header_h = 32
+    max_row_h = min(60, max(36, (available_h - header_h) // max(n, 1)))
+    font_size = max(10, min(14, max_row_h - 22))
 
-    # Column widths (proportional)
-    col_ratios = [0.22, 0.16, 0.10, 0.16, 0.14, 0.22]
-    if len(headers) != len(col_ratios):
-        col_ratios = [1 / len(headers)] * len(headers)
-    col_widths = [int(table_w * r) for r in col_ratios]
+    f_hdr      = _font(brand["font_bold"], 11)
+    f_rep      = _font(brand["font_bold"], font_size)
+    f_cell     = _font(brand.get("font_regular", brand["font_bold"]), font_size)
+    f_cell_b   = _font(brand["font_bold"], font_size)
 
-    row_h = font_size + 14
+    # Column layout — proportional widths
+    # SALES REP | MO. TARGET | MTD TARGET | BOOKED SALES | % OF TARGET | SUBMITTED
+    col_names   = ["Sales Rep", "Monthly Target", "MTD Target", "Booked Sales", "% of Target", "Submitted Sales"]
+    col_labels  = ["SALES REP", "MO. TARGET", "MTD TARGET", "BOOKED SALES", "% OF TARGET", "SUBMITTED"]
+    col_ratios  = [0.30, 0.13, 0.14, 0.14, 0.13, 0.16]
+    col_widths  = [int(table_w * r) for r in col_ratios]
+    # Fix rounding
+    col_widths[-1] = table_w - sum(col_widths[:-1])
 
-    # Header row
-    header_row_h = 26
-    draw.rectangle([margin, y, margin + table_w, y + header_row_h], fill=_hex(brand["cg_red"]))
-    x = margin
-    for col_i, (hdr, cw) in enumerate(zip(headers, col_widths)):
-        label = hdr.upper()
-        draw.text((x + 6, y + 7), label, font=font_header, fill=_hex(brand["text_white"]))
+    # ---- Header row ----
+    draw.rectangle([PAD, y, PAD + table_w, y + header_h], fill=_hex(brand["cg_red"]))
+    x = PAD
+    for label, cw in zip(col_labels, col_widths):
+        if col_labels.index(label) == 0:
+            draw.text((x + 10, y + (header_h - 11) // 2), label, font=f_hdr,
+                      fill=_hex(brand["text_white"]))
+        else:
+            lw = _tw(draw, label, f_hdr)
+            draw.text((x + cw // 2 - lw // 2, y + (header_h - 11) // 2), label,
+                      font=f_hdr, fill=_hex(brand["text_white"]))
         x += cw
-    y += header_row_h
+    y += header_h
 
-    # Data rows
-    for row_i, row in enumerate(rows):
-        row_color = brand["background_rows_odd"] if row_i % 2 == 0 else brand["background_rows_even"]
-        draw.rectangle([margin, y, margin + table_w, y + row_h], fill=_hex(row_color))
+    # ---- Data rows ----
+    for ri, row in enumerate(rows):
+        row_bg = brand["background_rows_odd"] if ri % 2 == 0 else brand["background_rows_even"]
+        draw.rectangle([PAD, y, PAD + table_w, y + max_row_h], fill=_hex(row_bg))
 
-        x = margin
-        for col_i, (col_name, cw) in enumerate(zip(headers, col_widths)):
-            value = row.get(col_name, "")
+        x = PAD
+        for ci, (col_name, cw) in enumerate(zip(col_names, col_widths)):
+            value = str(row.get(col_name, "") or "")
+            cy = y + (max_row_h - font_size) // 2
 
-            if col_name == "MTD Target":
-                # Draw on-target / off-target indicator
-                on_target = row.get("MTD Target")
-                indicator_x = x + cw // 2 - 6
-                indicator_y = y + row_h // 2 - 6
+            if ci == 0:
+                # Sales Rep — bold white, left-aligned
+                draw.text((x + 10, cy), value, font=f_rep, fill=_hex(brand["text_white"]))
+
+            elif col_name == "MTD Target":
+                # Color by on_target flag; value is the dollar string
+                on_target = row.get("MTD Target_flag")  # True/False/None
                 if on_target is True:
-                    # Teal circle = on target
-                    draw.ellipse(
-                        [indicator_x, indicator_y, indicator_x + 12, indicator_y + 12],
-                        fill=_hex(brand["cg_teal"]),
-                    )
+                    color = _hex(brand["accent_teal"])
                 elif on_target is False:
-                    # Red circle = behind
-                    draw.ellipse(
-                        [indicator_x, indicator_y, indicator_x + 12, indicator_y + 12],
-                        fill=_hex(brand["cg_red"]),
-                    )
+                    color = _hex(brand["cg_red"])
                 else:
-                    # Grey dash
-                    draw.rectangle(
-                        [indicator_x + 1, indicator_y + 5, indicator_x + 11, indicator_y + 7],
-                        fill=_hex(brand["md_gray"]),
-                    )
-            elif col_name == "Sales Rep":
-                draw.text(
-                    (x + 6, y + (row_h - font_size) // 2),
-                    str(value),
-                    font=font_cell_bold,
-                    fill=_hex(brand["text_white"]),
-                )
-            elif "$" in str(value) or re.search(r"^\$[\d,.]", str(value)):
-                draw.text(
-                    (x + 6, y + (row_h - font_size) // 2),
-                    str(value),
-                    font=font_cell,
-                    fill=_hex(brand["accent_teal"]),
-                )
+                    color = _hex(brand["text_white"])
+                vw = _tw(draw, value, f_cell)
+                draw.text((x + cw // 2 - vw // 2, cy), value, font=f_cell, fill=color)
+
+            elif col_name == "% of Target":
+                # Color teal if ≥100%, red if below
+                pct = _pct_value(value)
+                if pct is not None:
+                    color = _hex(brand["accent_teal"]) if pct >= 100 else _hex(brand["cg_red"])
+                else:
+                    color = _hex(brand["text_white"])
+                vw = _tw(draw, value, f_cell_b)
+                draw.text((x + cw // 2 - vw // 2, cy), value, font=f_cell_b, fill=color)
+
             else:
-                draw.text(
-                    (x + 6, y + (row_h - font_size) // 2),
-                    str(value),
-                    font=font_cell,
-                    fill=_hex(brand["text_white"]),
-                )
+                # All other columns — white, centered
+                vw = _tw(draw, value, f_cell)
+                draw.text((x + cw // 2 - vw // 2, cy), value, font=f_cell,
+                          fill=_hex(brand["text_white"]))
+
             x += cw
 
-        y += row_h
-        if y > H - 60:
-            log.warning("Table clipped — too many rows to fit.")
+        y += max_row_h
+        if y >= H - 50:
+            log.warning("Table clipped — not enough vertical space.")
             break
 
     return y
 
 
-def _draw_pattern_strip(draw: ImageDraw.Draw, W: int, y: int):
-    """7px repeating brand-color stripe."""
-    strip_h = 7
-    pattern = [
-        ("#E01B2B", 14),
-        ("#757575", 4),
-        ("#00A8B0", 14),
-        ("#757575", 4),
-    ]
+# ---------------------------------------------------------------------------
+# Pattern strip
+# ---------------------------------------------------------------------------
+
+def _draw_pattern(draw: ImageDraw.Draw, W: int, y: int) -> int:
+    H_STRIP = 7
+    pattern = [("#E01B2B", 14), ("#757575", 4), ("#00A8B0", 14), ("#757575", 4)]
     x = 0
     while x < W:
         for color, w in pattern:
-            draw.rectangle([x, y, x + w, y + strip_h], fill=_hex(color))
+            draw.rectangle([x, y, x + w, y + H_STRIP], fill=_hex(color))
             x += w
             if x >= W:
                 break
-    return y + strip_h
+    return y + H_STRIP
 
 
-def _draw_footer(draw: ImageDraw.Draw, cfg: dict, W: int, H: int, y: int):
+# ---------------------------------------------------------------------------
+# Footer
+# ---------------------------------------------------------------------------
+
+def _draw_footer(draw: ImageDraw.Draw, cfg: dict, W: int, y_top: int, H: int):
     brand = cfg["brand"]
-    footer_h = H - y
-    draw.rectangle([0, y, W, H], fill=_hex(brand["background_footer"]))
-
-    font_footer = _load_font(brand.get("font_regular", brand["font_bold"]), 10)
-    muted = _rgba_str("rgba(255,255,255,0.7)")
+    draw.rectangle([0, y_top, W, H], fill=_hex(brand["background_footer"]))
+    f = _font(brand.get("font_regular", brand["font_bold"]), 10)
     text = "ColorGraphicsWA.com  •  360-352-3970  •  Updated automatically each weekday morning"
-    draw.text((16, y + (footer_h - 10) // 2), text, font=font_footer, fill=muted)
+    fh = H - y_top
+    draw.text((16, y_top + (fh - 10) // 2), text, font=f, fill=_muted(160))
 
-    # Live indicator — teal dot + "Live"
-    dot_r = 4
-    dot_x = W - 60
-    dot_y = y + footer_h // 2
-    draw.ellipse(
-        [dot_x - dot_r, dot_y - dot_r, dot_x + dot_r, dot_y + dot_r],
-        fill=_hex(brand["accent_teal"]),
-    )
-    draw.text(
-        (dot_x + dot_r + 4, dot_y - 5),
-        "Live",
-        font=font_footer,
-        fill=_hex(brand["accent_teal"]),
-    )
+    # Live dot
+    dot_x, dot_y = W - 55, y_top + fh // 2
+    r = 4
+    draw.ellipse([dot_x - r, dot_y - r, dot_x + r, dot_y + r],
+                 fill=_hex(brand["accent_teal"]))
+    draw.text((dot_x + r + 4, dot_y - 5), "Live", font=f,
+              fill=_hex(brand["accent_teal"]))
 
 
 # ---------------------------------------------------------------------------
@@ -355,77 +376,49 @@ def _draw_footer(draw: ImageDraw.Draw, cfg: dict, W: int, H: int, y: int):
 
 def render(data: dict, cfg: dict, output_path: str | None = None) -> str:
     """
-    Render the branded dashboard PNG.
-
-    Args:
-        data: output of table_parser.parse()
-        cfg:  loaded config.yaml dict
-        output_path: override output path (default: output/sales_snapshot_YYYY-MM-DD.png)
-
-    Returns:
-        Path to the saved PNG file.
+    Render the 1152×1080 branded dashboard PNG.
+    Returns path to saved file.
     """
     brand = cfg["brand"]
-    W = cfg.get("canvas_width", 1152)
+    W = cfg.get("canvas_width",  1152)
     H = cfg.get("canvas_height", 1080)
     now = datetime.now()
 
-    # Ensure output dir exists
     out_dir = Path(cfg.get("output_folder", "output"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if output_path is None:
-        date_str = now.strftime("%Y-%m-%d")
-        output_path = str(out_dir / f"sales_snapshot_{date_str}.png")
+        output_path = str(out_dir / f"sales_snapshot_{now.strftime('%Y-%m-%d')}.png")
 
-    # Create canvas
-    img = Image.new("RGBA", (W, H), _hex_a(brand["background_main"]))
-    draw = ImageDraw.Draw(img)
+    img  = Image.new("RGBA", (W, H), _hex_a(brand["background_main"]))
+    draw = ImageDraw.Draw(img, "RGBA")
 
-    # Draw sections
-    header_bottom = _draw_header(img, draw, cfg, W, now)
-    cards_bottom = _draw_metric_cards(draw, cfg, W, header_bottom, data.get("metrics", {}))
+    y = _draw_header(img, draw, cfg, W, now)
+    y = _draw_ytd_cards(draw, cfg, W, y, data.get("metrics", {}).get("ytd", {}))
+    y = _draw_kpi_row(draw, cfg, W, y, data.get("metrics", {}).get("kpi", {}))
 
-    # Table fills from cards_bottom to pattern strip
-    footer_h = 30
-    strip_h = 7
-    table_bottom_limit = H - footer_h - strip_h
+    footer_h   = 35
+    strip_h    = 7
+    strip_y    = H - footer_h - strip_h
 
-    _draw_table(
-        draw,
-        cfg,
-        W,
-        cards_bottom,
-        table_bottom_limit,
-        data.get("headers", []),
-        data.get("rows", []),
-    )
+    _draw_table(draw, cfg, W, y, strip_y, data.get("headers", []), data.get("rows", []))
+    _draw_pattern(draw, W, strip_y)
+    _draw_footer(draw, cfg, W, strip_y + strip_h, H)
 
-    strip_y = H - footer_h - strip_h
-    _draw_pattern_strip(draw, W, strip_y)
-    _draw_footer(draw, cfg, W, H, strip_y + strip_h)
-
-    # Save
-    img_rgb = img.convert("RGB")
-    img_rgb.save(output_path, "PNG", optimize=True)
-    log.info("Saved dashboard PNG: %s", output_path)
-
-    # Always overwrite latest.png
-    latest_path = str(out_dir / "latest.png")
-    img_rgb.save(latest_path, "PNG")
-    log.info("Saved latest.png: %s", latest_path)
-
+    out = img.convert("RGB")
+    out.save(output_path, "PNG", optimize=True)
+    out.save(str(out_dir / "latest.png"), "PNG")
+    log.info("Saved: %s", output_path)
     return output_path
 
 
 # ---------------------------------------------------------------------------
-# CLI: render with dummy data for preview
+# CLI — render with dummy data matching the reference screenshot
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import sys
-
-    logging.basicConfig(level=logging.INFO)
+    import sys, logging as _logging
+    _logging.basicConfig(level=logging.INFO)
 
     cfg_path = Path("config.yaml")
     if not cfg_path.exists():
@@ -433,82 +426,69 @@ if __name__ == "__main__":
         sys.exit(1)
 
     with open(cfg_path) as f:
-        cfg = yaml.safe_load(f)
+        cfg = __import__("yaml").safe_load(f)
 
-    DUMMY_DATA = {
+    DUMMY = {
         "metrics": {
             "ytd": {
-                "Sales YTD": "$1,423,890",
-                "Growth": "+8.4%",
-                "Prior Year YTD": "$1,313,220",
+                "Sales YTD":      "$844,229",
+                "Growth":         "-1.1%",
+                "Prior Year YTD": "$853,719",
             },
             "kpi": {
-                "Sales/MTD": "$187,440",
-                "Calls/MTD": "312",
-                "Victories/MTD": "47",
-                "Opportunities/MTD": "89",
+                "Sales Today":        "$29,908",
+                "Sales/MTD":          "$396,797",
+                "Calls Today":        "0",
+                "Calls/MTD":          "28",
+                "Victories Today":    "0",
+                "Victories/MTD":      "5",
+                "Opps Today":         "0",
+                "Opportunities/MTD":  "48 | $91.13%",
             },
         },
         "headers": [
-            "Sales Rep",
-            "Monthly Target",
-            "MTD Target",
-            "Booked Sales",
-            "% of Target",
-            "Submitted Sales",
+            "Sales Rep", "Monthly Target", "MTD Target",
+            "Booked Sales", "% of Target", "Submitted Sales",
         ],
         "rows": [
             {
-                "Sales Rep": "Alex Johnson",
-                "Monthly Target": "$42,000",
-                "MTD Target": True,
-                "Booked Sales": "$38,450",
-                "% of Target": "91%",
-                "Submitted Sales": "$41,200",
+                "Sales Rep":       "Heidi Lopez-Mix",
+                "Monthly Target":  "$130,000",
+                "MTD Target":      "$125,806",
+                "MTD Target_flag": True,
+                "Booked Sales":    "$164,876",
+                "% of Target":     "126.8%",
+                "Submitted Sales": "$76,874",
             },
             {
-                "Sales Rep": "Maria Santos",
-                "Monthly Target": "$38,000",
-                "MTD Target": True,
-                "Booked Sales": "$40,110",
-                "% of Target": "106%",
-                "Submitted Sales": "$40,110",
+                "Sales Rep":       "Kiley Gustafson",
+                "Monthly Target":  "$50,000",
+                "MTD Target":      "$48,387",
+                "MTD Target_flag": True,
+                "Booked Sales":    "$89,945",
+                "% of Target":     "179.9%",
+                "Submitted Sales": "$29,805",
             },
             {
-                "Sales Rep": "Derek Chu",
-                "Monthly Target": "$35,000",
-                "MTD Target": False,
-                "Booked Sales": "$22,870",
-                "% of Target": "65%",
-                "Submitted Sales": "$24,900",
+                "Sales Rep":       "Tricia Carlson",
+                "Monthly Target":  "$60,000",
+                "MTD Target":      "$58,064",
+                "MTD Target_flag": False,
+                "Booked Sales":    "$36,036",
+                "% of Target":     "60.1%",
+                "Submitted Sales": "$18,919",
             },
             {
-                "Sales Rep": "Priya Nair",
-                "Monthly Target": "$40,000",
-                "MTD Target": True,
-                "Booked Sales": "$39,800",
-                "% of Target": "100%",
-                "Submitted Sales": "$39,800",
-            },
-            {
-                "Sales Rep": "Tom Waverly",
-                "Monthly Target": "$32,000",
-                "MTD Target": False,
-                "Booked Sales": "$18,200",
-                "% of Target": "57%",
-                "Submitted Sales": "$20,100",
-            },
-            {
-                "Sales Rep": "Keisha Brooks",
-                "Monthly Target": "$45,000",
-                "MTD Target": True,
-                "Booked Sales": "$44,100",
-                "% of Target": "98%",
-                "Submitted Sales": "$44,100",
+                "Sales Rep":       "Voshte Demmert-G.",
+                "Monthly Target":  "$109,000",
+                "MTD Target":      "$105,483",
+                "MTD Target_flag": False,
+                "Booked Sales":    "$95,938",
+                "% of Target":     "88.0%",
+                "Submitted Sales": "$80,943",
             },
         ],
     }
 
-    out = render(DUMMY_DATA, cfg)
-    print(f"Preview saved: {out}")
-    print(f"Latest: output/latest.png")
+    out = render(DUMMY, cfg)
+    print(f"Preview: {out}")
