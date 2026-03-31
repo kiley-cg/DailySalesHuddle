@@ -52,6 +52,20 @@ def _find_img_indicator(cell: Tag) -> bool | None:
     return None
 
 
+def _find_img_and_text(cell: Tag) -> tuple[bool | None, str]:
+    """
+    Return (on_target_flag, dollar_text) from a MTD Target cell.
+    The Atease email puts an indicator image AND a dollar value in this cell.
+    """
+    flag = _find_img_indicator(cell)
+
+    # Remove the img tag temporarily to extract just the text
+    for img in cell.find_all("img"):
+        img.decompose()
+    text = _clean(_text(cell))
+    return flag, text
+
+
 # ---------------------------------------------------------------------------
 # Section 1 — YTD summary
 # ---------------------------------------------------------------------------
@@ -109,23 +123,33 @@ def _extract_ytd_summary(soup: BeautifulSoup) -> dict:
 # ---------------------------------------------------------------------------
 
 _KPI_LABELS = {
-    "Sales/MTD": re.compile(r"Sales\s*/\s*MTD", re.I),
-    "Calls/MTD": re.compile(r"Calls\s*/\s*MTD", re.I),
-    "Victories/MTD": re.compile(r"Victories\s*/\s*MTD|Victories", re.I),
-    "Opportunities/MTD": re.compile(r"Opportunities\s*/\s*MTD|Opportunities", re.I),
+    # Today values
+    "Sales Today":       re.compile(r"Sales\s+Today", re.I),
+    "Calls Today":       re.compile(r"Calls\s+Today", re.I),
+    "Victories Today":   re.compile(r"Victories\s+Today", re.I),
+    "Opps Today":        re.compile(r"Opps?\s+Today|Opportunities\s+Today", re.I),
+    # MTD values
+    "Sales/MTD":         re.compile(r"Sales\s*(MTD|/\s*MTD)", re.I),
+    "Calls/MTD":         re.compile(r"Calls\s*(MTD|/\s*MTD)", re.I),
+    "Victories/MTD":     re.compile(r"Victories\s*(MTD|/\s*MTD)", re.I),
+    "Opportunities/MTD": re.compile(r"Opps?\s*(MTD|/\s*MTD)|Opportunities\s*(MTD|/\s*MTD)", re.I),
 }
 
 
 def _extract_kpi_block(soup: BeautifulSoup) -> dict:
-    """Extract KPI values from labeled cells/divs."""
+    """
+    Extract KPI values — both Today and MTD — from the email KPI block.
+    The Atease email typically lays these out in a table with label/value pairs
+    arranged horizontally or vertically.
+    """
     result = {k: "" for k in _KPI_LABELS}
 
+    # Strategy 1: find each label as a text node and grab adjacent value
     for kpi_name, pattern in _KPI_LABELS.items():
         for node in soup.find_all(string=pattern):
             parent = node.find_parent(["td", "th", "div", "span"])
             if parent is None:
                 continue
-            # Value is often in the next sibling cell or the parent's next sibling
             for candidate in [
                 parent.find_next_sibling(),
                 parent.parent.find_next_sibling() if parent.parent else None,
@@ -137,6 +161,19 @@ def _extract_kpi_block(soup: BeautifulSoup) -> dict:
                         break
             if result[kpi_name]:
                 break
+
+    # Strategy 2: scan all cells for known label+value in same cell (e.g. "Sales Today: $x")
+    for kpi_name, pattern in _KPI_LABELS.items():
+        if result[kpi_name]:
+            continue
+        for cell in soup.find_all(["td", "th", "div", "span", "p"]):
+            txt = _clean(_text(cell))
+            if pattern.search(txt):
+                # Try to extract a number/dollar from the same cell text
+                remainder = pattern.sub("", txt).strip().lstrip(":").strip()
+                if remainder and re.search(r"[\d$]", remainder):
+                    result[kpi_name] = remainder
+                    break
 
     log.debug("KPI block: %s", result)
     return result
@@ -249,7 +286,9 @@ def _extract_targets_table(soup: BeautifulSoup) -> tuple[list[str], list[dict]]:
                 continue
             cell = cells[idx]
             if col_name == "MTD Target":
-                row_dict["MTD Target"] = _find_img_indicator(cell)
+                flag, dollar_text = _find_img_and_text(cell)
+                row_dict["MTD Target"] = dollar_text          # e.g. "$125,806"
+                row_dict["MTD Target_flag"] = flag            # True/False/None
             else:
                 row_dict[col_name] = _clean(_text(cell))
 
