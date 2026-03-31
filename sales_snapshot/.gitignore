@@ -1,0 +1,9 @@
+credentials.json
+token.json
+.env
+processed.db
+output/
+logs/
+__pycache__/
+*.pyc
+.DS_Store

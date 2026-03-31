@@ -1,0 +1,28 @@
+gmail_filter_sender: ""
+gmail_filter_subject: ""
+check_interval_minutes: 5
+no_email_alert_time: "08:45"
+
+brand:
+  background_main: "#757575"
+  background_header: "#5a5a5a"
+  background_footer: "#5a5a5a"
+  background_cards: "#686868"
+  background_rows_odd: "#686868"
+  background_rows_even: "#626262"
+  cg_red: "#E01B2B"
+  cg_teal: "#00A8B0"
+  md_gray: "#B1B3B6"
+  accent_teal: "#00d4de"
+  text_white: "#FFFFFF"
+  font_bold: "assets/fonts/Barlow-Bold.ttf"
+  font_semibold: "assets/fonts/Barlow-SemiBold.ttf"
+  font_regular: "assets/fonts/Barlow-Regular.ttf"
+
+optisigns_screen_name: "Sales Huddle"
+optisigns_zone_name: "Main Left"
+canvas_width: 1152
+canvas_height: 1080
+output_folder: "output"
+log_folder: "logs"
+logo_path: "assets/CG_Primary.png"
