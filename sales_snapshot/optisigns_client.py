@@ -76,13 +76,13 @@ def upload_asset(png_path: str, asset_name: str) -> str:
     log.info("Uploading asset '%s' from %s", asset_name, png_path)
 
     # Step 1a: get pre-signed upload options
-    # getFileUploadOptions returns a JSONObject scalar — no subfield selection
+    # getFileUploadOptions(payload: UpdateObjectInput!) returns a JSONObject scalar
     query = """
-    query GetFileUploadOptions($name: String!, $contentType: String!) {
-      getFileUploadOptions(name: $name, contentType: $contentType)
+    query GetFileUploadOptions($payload: UpdateObjectInput!) {
+      getFileUploadOptions(payload: $payload)
     }
     """
-    data = _gql(query, {"name": asset_name, "contentType": "image/png"})
+    data = _gql(query, {"payload": {"fileTypes": ["image/png"]}})
     upload_opts = data["getFileUploadOptions"]
     log.info("getFileUploadOptions response: %s", upload_opts)
     upload_url = upload_opts["uploadUrl"]
