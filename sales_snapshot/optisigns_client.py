@@ -111,19 +111,23 @@ def upload_asset(png_path: str, asset_name: str) -> str:
     log.info("PNG uploaded successfully")
 
     # Step 1c: register the asset in OptiSigns library
+    # AssetInput fields confirmed via introspection
     mutation = """
     mutation SaveAsset($payload: AssetInput!) {
       saveAsset(payload: $payload) {
         _id
-        name
+        originalFileName
       }
     }
     """
+    file_size = os.path.getsize(png_path)
     asset_payload = {
-        "name": asset_name,
         "type": "image",
-        "fileUrl": file_url,
-        "contentType": "image/png",
+        "fileType": "image/png",
+        "originalFileName": asset_name,
+        "originalFileExtension": "png",
+        "returnedUrl": file_url,
+        "fileSize": file_size,
     }
     confirm_data = _gql(mutation, {"payload": asset_payload})
     asset_id = confirm_data["saveAsset"]["_id"]
