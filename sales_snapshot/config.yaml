@@ -1,5 +1,5 @@
-gmail_filter_sender: ""
-gmail_filter_subject: ""
+gmail_filter_sender: "dailyreport@facilisgroup.com"
+gmail_filter_subject: "Color Graphics Daily Leaderboard"
 check_interval_minutes: 5
 no_email_alert_time: "08:45"
 
