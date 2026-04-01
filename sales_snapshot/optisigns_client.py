@@ -48,7 +48,8 @@ def _gql(query: str, variables: Optional[dict] = None) -> dict:
             resp = requests.post(
                 GRAPHQL_URL, json=payload, headers=_headers(), timeout=30
             )
-            resp.raise_for_status()
+            if not resp.ok:
+                raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
             body = resp.json()
             if "errors" in body:
                 raise RuntimeError(f"GraphQL errors: {body['errors']}")
@@ -286,23 +287,36 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     load_dotenv()
 
-    print("Listing all devices…")
-    query = """
-    query {
-      devices(limit: 50) {
-        items {
-          _id
-          name
-        }
-      }
-    }
-    """
-    try:
-        data = _gql(query)
-        devices = data.get("devices", {}).get("items", [])
-        print(f"\nFound {len(devices)} device(s):")
-        for d in devices:
-            print(f"  _id={d['_id']}  name='{d['name']}'")
-    except Exception as exc:
-        print(f"Error: {exc}")
-        sys.exit(1)
+    # Try several query shapes to find the correct OptiSigns schema
+    queries = [
+        ("screens",  "query { screens(limit:50) { items { _id name } } }"),
+        ("devices",  "query { devices(limit:50) { items { _id name } } }"),
+        ("getScreens", "query { getScreens { _id name } }"),
+        ("screenList", "query { screenList { _id name } }"),
+    ]
+
+    for label, query in queries:
+        print(f"Trying '{label}' query…")
+        try:
+            resp = requests.post(
+                GRAPHQL_URL,
+                json={"query": query},
+                headers=_headers(),
+                timeout=15,
+            )
+            print(f"  HTTP {resp.status_code}")
+            body = resp.json()
+            if "errors" in body:
+                print(f"  GraphQL error: {body['errors'][0].get('message','?')}")
+                continue
+            data = body.get("data", {})
+            items = (data.get(label) or {}).get("items") or data.get(label) or []
+            if items:
+                print(f"  ✓ Found {len(items)} screen(s):")
+                for s in items:
+                    print(f"    _id={s.get('_id','?')}  name='{s.get('name','?')}'")
+                break
+            else:
+                print(f"  No items in response: {json.dumps(data)[:200]}")
+        except Exception as exc:
+            print(f"  Error: {exc}")
