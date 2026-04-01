@@ -76,17 +76,15 @@ def upload_asset(png_path: str, asset_name: str) -> str:
     log.info("Uploading asset '%s' from %s", asset_name, png_path)
 
     # Step 1a: get pre-signed upload options
+    # getFileUploadOptions returns a JSONObject scalar — no subfield selection
     query = """
     query GetFileUploadOptions($name: String!, $contentType: String!) {
-      getFileUploadOptions(name: $name, contentType: $contentType) {
-        uploadUrl
-        fileUrl
-        fields
-      }
+      getFileUploadOptions(name: $name, contentType: $contentType)
     }
     """
     data = _gql(query, {"name": asset_name, "contentType": "image/png"})
     upload_opts = data["getFileUploadOptions"]
+    log.info("getFileUploadOptions response: %s", upload_opts)
     upload_url = upload_opts["uploadUrl"]
     file_url = upload_opts["fileUrl"]
     # fields may be a dict of extra form fields for S3 multipart, or null
@@ -443,6 +441,23 @@ if __name__ == "__main__":
         except Exception as exc:
             print(f"Error: {exc}")
 
+    elif cmd == "test-upload":
+        png = sys.argv[2] if len(sys.argv) > 2 else "output/latest.png"
+        if not os.path.exists(png):
+            print(f"PNG not found: {png}")
+            print("Usage: python optisigns_client.py test-upload [path/to/file.png]")
+            sys.exit(1)
+        print(f"Testing full upload+push with {png}…")
+        import yaml
+        with open("config.yaml") as f:
+            cfg = yaml.safe_load(f)
+        try:
+            asset_id = push_to_optisigns(png, cfg)
+            print(f"\nSUCCESS — asset _id: {asset_id}")
+            print("Check your OptiSigns screen — it should now show the PNG.")
+        except Exception as exc:
+            print(f"\nFAILED: {exc}")
+
     else:
         print(f"Unknown command: {cmd}")
-        print("Usage: python optisigns_client.py [list-devices | list-assets | test-auth]")
+        print("Usage: python optisigns_client.py [list-devices | list-assets | test-auth | test-upload [file.png]]")
