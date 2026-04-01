@@ -1,305 +1,220 @@
-from typing import Optional, Tuple
+from __future__ import annotations
 """
-table_parser.py
-Parses the Color Graphics Daily Leaderboard email from Atease Systems.
+table_parser.py — Atease/Facilis Color Graphics Daily Leaderboard email parser.
 
-Extracts three sections:
-  1. YTD summary row  → metrics[0]  (Sales YTD, Growth, Prior Year YTD)
-  2. KPI block        → metrics[1]  (Sales/MTD, Calls/MTD, Victories/MTD, Opportunities/MTD)
-  3. Sales Targets table → headers + rows
-     Columns: Sales Rep | Monthly Target | MTD Target | Booked Sales | % of Target | Submitted Sales
-     MTD Target column: image indicator
-       table_ontarget.gif  → on_target = True
-       table_offtarget.gif → on_target = False
+Email structure (confirmed from live HTML):
+  Table 8  (3 cells)  — YTD summary
+  Table 11 (9 cells)  — KPI block (cells 5-8 hold the data)
+  Table 27 (30 cells) — Sales Targets (6 header + N×6 data rows)
+
+Finder strategy: keyword match + take innermost (fewest cells) table.
 """
 
 import logging
 import re
-from typing import Any
+from typing import Optional, Tuple, List
 
 from bs4 import BeautifulSoup, Tag
 
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _text(node) -> str:
-    """Return stripped text content of a BS4 node."""
-    if node is None:
-        return ""
-    return node.get_text(separator=" ", strip=True)
-
-
-def _clean(value: str) -> str:
-    """Collapse whitespace and remove non-breaking spaces."""
-    return re.sub(r"\s+", " ", value.replace("\xa0", " ").replace("&nbsp;", " ")).strip()
-
-
-def _find_img_indicator(cell: Tag) -> Optional[bool]:
-    """
-    Return True if the cell contains table_ontarget.gif,
-    False if table_offtarget.gif, None if no indicator found.
-    """
-    img = cell.find("img")
-    if img is None:
-        return None
-    src = img.get("src", "").lower()
-    if "ontarget" in src:
-        return True
-    if "offtarget" in src:
-        return False
-    return None
-
-
-def _find_img_and_text(cell: Tag) -> Tuple[Optional[bool], str]:
-    """
-    Return (on_target_flag, dollar_text) from a MTD Target cell.
-    The Atease email puts an indicator image AND a dollar value in this cell.
-    """
-    flag = _find_img_indicator(cell)
-
-    # Remove the img tag temporarily to extract just the text
-    for img in cell.find_all("img"):
-        img.decompose()
-    text = _clean(_text(cell))
-    return flag, text
-
-
-# ---------------------------------------------------------------------------
-# Section 1 — YTD summary
-# ---------------------------------------------------------------------------
-
-def _extract_ytd_summary(soup: BeautifulSoup) -> dict:
-    """
-    Looks for a row/cell block containing labels like 'Sales YTD', 'Growth',
-    'Prior Year YTD'.  Returns a dict with those keys.
-    """
-    result = {"Sales YTD": "", "Growth": "", "Prior Year YTD": ""}
-
-    # Try to find by label text proximity
-    for label_node in soup.find_all(string=re.compile(r"Sales\s+YTD", re.I)):
-        parent_row = label_node.find_parent("tr")
-        if parent_row:
-            cells = parent_row.find_all(["td", "th"])
-            # Grab the value cell immediately after the label cell
-            for i, cell in enumerate(cells):
-                if re.search(r"Sales\s+YTD", _text(cell), re.I):
-                    if i + 1 < len(cells):
-                        result["Sales YTD"] = _clean(_text(cells[i + 1]))
-                elif re.search(r"Growth", _text(cell), re.I):
-                    if i + 1 < len(cells):
-                        result["Growth"] = _clean(_text(cells[i + 1]))
-                elif re.search(r"Prior\s+Year", _text(cell), re.I):
-                    if i + 1 < len(cells):
-                        result["Prior Year YTD"] = _clean(_text(cells[i + 1]))
-            if any(result.values()):
-                break
-
-    # Fallback: scan all text for dollar amounts near these labels
-    if not any(result.values()):
-        for tag in soup.find_all(["td", "th", "div", "span", "p"]):
-            txt = _clean(_text(tag))
-            if re.search(r"Sales\s+YTD", txt, re.I):
-                # Try sibling
-                sibling = tag.find_next_sibling()
-                if sibling:
-                    result["Sales YTD"] = _clean(_text(sibling))
-            elif re.search(r"Prior\s+Year\s+YTD", txt, re.I):
-                sibling = tag.find_next_sibling()
-                if sibling:
-                    result["Prior Year YTD"] = _clean(_text(sibling))
-            elif re.search(r"\bGrowth\b", txt, re.I) and not result["Growth"]:
-                sibling = tag.find_next_sibling()
-                if sibling:
-                    result["Growth"] = _clean(_text(sibling))
-
-    log.debug("YTD summary: %s", result)
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Section 2 — KPI block
-# ---------------------------------------------------------------------------
-
-_KPI_LABELS = {
-    # Today values
-    "Sales Today":       re.compile(r"Sales\s+Today", re.I),
-    "Calls Today":       re.compile(r"Calls\s+Today", re.I),
-    "Victories Today":   re.compile(r"Victories\s+Today", re.I),
-    "Opps Today":        re.compile(r"Opps?\s+Today|Opportunities\s+Today", re.I),
-    # MTD values
-    "Sales/MTD":         re.compile(r"Sales\s*(MTD|/\s*MTD)", re.I),
-    "Calls/MTD":         re.compile(r"Calls\s*(MTD|/\s*MTD)", re.I),
-    "Victories/MTD":     re.compile(r"Victories\s*(MTD|/\s*MTD)", re.I),
-    "Opportunities/MTD": re.compile(r"Opps?\s*(MTD|/\s*MTD)|Opportunities\s*(MTD|/\s*MTD)", re.I),
-}
-
-
-def _extract_kpi_block(soup: BeautifulSoup) -> dict:
-    """
-    Extract KPI values — both Today and MTD — from the email KPI block.
-    The Atease email typically lays these out in a table with label/value pairs
-    arranged horizontally or vertically.
-    """
-    result = {k: "" for k in _KPI_LABELS}
-
-    # Strategy 1: find each label as a text node and grab adjacent value
-    for kpi_name, pattern in _KPI_LABELS.items():
-        for node in soup.find_all(string=pattern):
-            parent = node.find_parent(["td", "th", "div", "span"])
-            if parent is None:
-                continue
-            for candidate in [
-                parent.find_next_sibling(),
-                parent.parent.find_next_sibling() if parent.parent else None,
-            ]:
-                if candidate:
-                    val = _clean(_text(candidate))
-                    if val and val != _clean(_text(parent)):
-                        result[kpi_name] = val
-                        break
-            if result[kpi_name]:
-                break
-
-    # Strategy 2: scan all cells for known label+value in same cell (e.g. "Sales Today: $x")
-    for kpi_name, pattern in _KPI_LABELS.items():
-        if result[kpi_name]:
-            continue
-        for cell in soup.find_all(["td", "th", "div", "span", "p"]):
-            txt = _clean(_text(cell))
-            if pattern.search(txt):
-                # Try to extract a number/dollar from the same cell text
-                remainder = pattern.sub("", txt).strip().lstrip(":").strip()
-                if remainder and re.search(r"[\d$]", remainder):
-                    result[kpi_name] = remainder
-                    break
-
-    log.debug("KPI block: %s", result)
-    return result
-
-
-# ---------------------------------------------------------------------------
-# Section 3 — Sales Targets table
-# ---------------------------------------------------------------------------
-
-_TARGETS_COLS = [
-    "Sales Rep",
-    "Monthly Target",
-    "MTD Target",
-    "Booked Sales",
-    "% of Target",
-    "Submitted Sales",
+TARGETS_HEADERS = [
+    "SALES REP", "MONTHLY TARGET", "MTD TARGET",
+    "BOOKED SALES", "% OF TARGET", "SUBMITTED SALES",
 ]
 
-_COL_PATTERNS = {
-    "Sales Rep": re.compile(r"Sales\s+Rep|Rep\s+Name|Name", re.I),
-    "Monthly Target": re.compile(r"Monthly\s+Target|Month\s+Target", re.I),
-    "MTD Target": re.compile(r"MTD\s+Target|On\s+Target", re.I),
-    "Booked Sales": re.compile(r"Booked\s+Sales|Booked", re.I),
-    "% of Target": re.compile(r"%\s+of\s+Target|Pct|Percent|%", re.I),
-    "Submitted Sales": re.compile(r"Submitted\s+Sales|Submitted", re.I),
-}
+
+# ---------------------------------------------------------------------------
+# Formatting helpers
+# ---------------------------------------------------------------------------
+
+def _fmt_dollar(raw: str) -> str:
+    """'130,000.00' → '$130,000'  |  '' → ''"""
+    s = str(raw).strip().replace("$", "").replace(",", "")
+    m = re.match(r"^(-?\d+)(?:\.\d+)?$", s)
+    if not m:
+        return raw.strip()
+    n = int(m.group(1))
+    return f"-${abs(n):,}" if n < 0 else f"${n:,}"
 
 
-def _find_targets_table(soup: BeautifulSoup) -> Optional[Tag]:
-    """
-    Locate the Sales Targets table by looking for a table that contains
-    at least 3 of the expected column headers.
-    """
-    for table in soup.find_all("table"):
-        header_text = _clean(_text(table)).lower()
-        matches = sum(
-            1
-            for pat in _COL_PATTERNS.values()
-            if pat.search(header_text)
-        )
-        if matches >= 3:
-            return table
+def _last_number(text: str) -> str:
+    """Extract the last numeric token (inc. minus, %) from a string."""
+    hits = re.findall(r"-?[\d,]+(?:\.\d+)?%?", text)
+    return hits[-1] if hits else ""
 
-    # Fallback: largest table by cell count
-    tables = soup.find_all("table")
-    if tables:
-        return max(tables, key=lambda t: len(t.find_all(["td", "th"])))
+
+def _cells(table: Tag) -> list:
+    return table.find_all(["td", "th"])
+
+
+# ---------------------------------------------------------------------------
+# Table finders  (innermost = fewest cells = least nesting)
+# ---------------------------------------------------------------------------
+
+def _find_ytd_table(soup: BeautifulSoup) -> Optional[list]:
+    """3-cell table: SALES YTD | GROWTH | SALES PRIOR YTD"""
+    candidates = []
+    for t in soup.find_all("table"):
+        cs = _cells(t)
+        if len(cs) != 3:
+            continue
+        txt = " ".join(c.get_text(" ", strip=True).upper() for c in cs)
+        if "SALES YTD" in txt and "GROWTH" in txt:
+            candidates.append(cs)
+    # Prefer the one whose combined text is shortest (innermost)
+    return min(candidates, key=lambda cs: sum(len(c.get_text()) for c in cs)) if candidates else None
+
+
+def _find_kpi_table(soup: BeautifulSoup) -> Optional[list]:
+    """Innermost table containing SALES MTD + CALLS MTD + VICTORIES MTD."""
+    for t in sorted(soup.find_all("table"), key=lambda t: len(_cells(t))):
+        txt = t.get_text(" ", strip=True).upper()
+        if "SALES MTD" in txt and "CALLS MTD" in txt and "VICTORIES MTD" in txt:
+            return _cells(t)
     return None
 
 
-def _map_columns(header_cells: list[Tag]) -> dict[str, int]:
-    """Return {canonical_col_name: column_index} for recognised headers."""
-    col_map = {}
-    for i, cell in enumerate(header_cells):
-        txt = _clean(_text(cell))
-        # Check for image-only header (MTD Target column)
-        img = cell.find("img")
-        if img and not txt:
-            col_map["MTD Target"] = i
+def _find_targets_table(soup: BeautifulSoup) -> Optional[list]:
+    """Innermost table whose first 6 cells match the expected column headers."""
+    for t in sorted(soup.find_all("table"), key=lambda t: len(_cells(t))):
+        cs = _cells(t)
+        if len(cs) < 12:
             continue
-        for col_name, pat in _COL_PATTERNS.items():
-            if pat.search(txt) and col_name not in col_map:
-                col_map[col_name] = i
-                break
-    return col_map
+        first_six = [cs[i].get_text(" ", strip=True).upper().strip() for i in range(6)]
+        if first_six == TARGETS_HEADERS:
+            return cs
+    return None
 
 
-def _extract_targets_table(soup: BeautifulSoup) -> tuple[list[str], list[dict]]:
-    """Return (headers_list, rows_list_of_dicts) for the Sales Targets table."""
-    table = _find_targets_table(soup)
-    if table is None:
-        log.warning("No Sales Targets table found.")
-        return _TARGETS_COLS, []
+# ---------------------------------------------------------------------------
+# Section parsers
+# ---------------------------------------------------------------------------
 
-    # Separate header rows from data rows
-    all_rows = table.find_all("tr")
-    header_row = None
-    data_rows = []
+def _parse_ytd(cells: list) -> dict:
+    result = {"Sales YTD": "", "Growth": "", "Prior Year YTD": ""}
+    for cell in cells:
+        text = cell.get_text(" ", strip=True)
+        upper = text.upper()
+        val = _last_number(text)
+        if "SALES YTD" in upper:
+            result["Sales YTD"] = _fmt_dollar(val)
+        elif "GROWTH" in upper:
+            result["Growth"] = val          # keep as-is: "-1.1%"
+        elif "PRIOR YTD" in upper or ("SALES PRIOR" in upper):
+            result["Prior Year YTD"] = _fmt_dollar(val)
+    log.debug("YTD: %s", result)
+    return result
 
-    for row in all_rows:
-        cells = row.find_all(["th", "td"])
-        if not cells:
+
+def _parse_kpi(cells: list) -> dict:
+    """
+    Non-empty cells contain patterns:
+      "SALES 29,908.24 SALES MTD 386,797.31"
+      "CALLS 0 CALLS MTD 28"
+      "VICTORIES 0 VICTORIES MTD 5"
+      "OPPORTUNITIES (WEIGHTED) 0 (0.00) OPPORTUNITIES MTD (WEIGHTED) 46 (61,135.00)"
+    """
+    result = {
+        "Sales Today": "", "Sales/MTD": "",
+        "Calls Today": "", "Calls/MTD": "",
+        "Victories Today": "", "Victories/MTD": "",
+        "Opps Today": "", "Opportunities/MTD": "",
+    }
+
+    for cell in cells:
+        text = cell.get_text(" ", strip=True)
+        if not text:
             continue
-        # Identify header row: contains known column names or all <th>
-        row_text = " ".join(_clean(_text(c)) for c in cells)
-        matches = sum(1 for pat in _COL_PATTERNS.values() if pat.search(row_text))
-        if matches >= 3 and header_row is None:
-            header_row = cells
-        elif header_row is not None:
-            data_rows.append(cells)
+        up = text.upper()
 
-    if header_row is None:
-        # Try first row as header
-        if all_rows:
-            header_row = all_rows[0].find_all(["th", "td"])
-            data_rows = [r.find_all(["th", "td"]) for r in all_rows[1:] if r.find_all(["th", "td"])]
+        if "SALES" in up and "CALLS" not in up and "VICTORIES" not in up and "OPPORTUNITIES" not in up:
+            # "SALES 29,908.24 SALES MTD 386,797.31"
+            m1 = re.search(r"SALES\s+([\d,]+(?:\.\d+)?)", text, re.I)
+            m2 = re.search(r"SALES\s+MTD\s+([\d,]+(?:\.\d+)?)", text, re.I)
+            if m1:
+                result["Sales Today"] = _fmt_dollar(m1.group(1))
+            if m2:
+                result["Sales/MTD"] = _fmt_dollar(m2.group(1))
 
-    col_map = _map_columns(header_row) if header_row else {}
-    log.debug("Column map: %s", col_map)
+        elif "CALLS" in up:
+            # "CALLS 0 CALLS MTD 28"
+            m1 = re.search(r"^CALLS\s+(\d+)", text, re.I)
+            m2 = re.search(r"CALLS\s+MTD\s+(\d+)", text, re.I)
+            if m1:
+                result["Calls Today"] = m1.group(1)
+            if m2:
+                result["Calls/MTD"] = m2.group(1)
 
+        elif "VICTORIES" in up:
+            # "VICTORIES 0 VICTORIES MTD 5"
+            m1 = re.search(r"^VICTORIES\s+(\d+)", text, re.I)
+            m2 = re.search(r"VICTORIES\s+MTD\s+(\d+)", text, re.I)
+            if m1:
+                result["Victories Today"] = m1.group(1)
+            if m2:
+                result["Victories/MTD"] = m2.group(1)
+
+        elif "OPPORTUNITIES" in up:
+            # "OPPORTUNITIES (WEIGHTED) 0 (0.00) OPPORTUNITIES MTD (WEIGHTED) 46 (61,135.00)"
+            m1 = re.search(r"OPPORTUNITIES\s+(?:\(WEIGHTED\)\s+)?(\d+)", text, re.I)
+            m2 = re.search(
+                r"OPPORTUNITIES\s+MTD\s+(?:\(WEIGHTED\)\s+)?(\d+)\s+\(([\d,]+(?:\.\d+)?)\)",
+                text, re.I,
+            )
+            if m1:
+                result["Opps Today"] = m1.group(1)
+            if m2:
+                count = m2.group(1)
+                weighted = _fmt_dollar(m2.group(2))
+                result["Opportunities/MTD"] = f"{count} | {weighted}"
+
+    log.debug("KPI: %s", result)
+    return result
+
+
+def _parse_targets(cells: list) -> Tuple[List[str], List[dict]]:
+    """
+    cells[0:6]  = header row
+    cells[6:]   = data rows in groups of 6
+    Column order: Sales Rep | Monthly Target | MTD Target | Booked Sales | % of Target | Submitted Sales
+    MTD Target cell contains on/off-target image.
+    """
+    headers = [
+        "Sales Rep", "Monthly Target", "MTD Target",
+        "Booked Sales", "% of Target", "Submitted Sales",
+    ]
     rows = []
-    for cells in data_rows:
-        if not cells:
-            continue
-        row_dict: dict[str, Any] = {}
-        for col_name in _TARGETS_COLS:
-            idx = col_map.get(col_name)
-            if idx is None or idx >= len(cells):
-                row_dict[col_name] = "" if col_name != "MTD Target" else None
-                continue
-            cell = cells[idx]
-            if col_name == "MTD Target":
-                flag, dollar_text = _find_img_and_text(cell)
-                row_dict["MTD Target"] = dollar_text          # e.g. "$125,806"
-                row_dict["MTD Target_flag"] = flag            # True/False/None
-            else:
-                row_dict[col_name] = _clean(_text(cell))
 
-        # Skip empty rows (no rep name and no values)
-        if not any(str(v).strip() for v in row_dict.values()):
+    data = cells[6:]
+    for i in range(0, len(data) - 5, 6):
+        chunk = data[i : i + 6]
+        rep = chunk[0].get_text(" ", strip=True)
+        if not rep:
             continue
-        rows.append(row_dict)
 
-    log.info("Extracted %d rows from Sales Targets table.", len(rows))
-    return _TARGETS_COLS, rows
+        # On/off-target flag from MTD cell image
+        img = chunk[2].find("img")
+        if img:
+            src = img.get("src", "").lower()
+            flag = True if "ontarget" in src else (False if "offtarget" in src else None)
+        else:
+            flag = None
+
+        mtd_val = chunk[2].get_text(" ", strip=True)
+
+        rows.append({
+            "Sales Rep":       rep,
+            "Monthly Target":  _fmt_dollar(chunk[1].get_text(strip=True)),
+            "MTD Target":      _fmt_dollar(mtd_val) if mtd_val else "",
+            "MTD Target_flag": flag,
+            "Booked Sales":    _fmt_dollar(chunk[3].get_text(strip=True)),
+            "% of Target":     chunk[4].get_text(strip=True),
+            "Submitted Sales": _fmt_dollar(chunk[5].get_text(strip=True)),
+        })
+
+    log.info("Parsed %d sales rep rows.", len(rows))
+    return headers, rows
 
 
 # ---------------------------------------------------------------------------
@@ -308,37 +223,32 @@ def _extract_targets_table(soup: BeautifulSoup) -> tuple[list[str], list[dict]]:
 
 def parse(html_body: str) -> dict:
     """
-    Parse the Atease leaderboard email HTML.
+    Parse the Atease/Facilis daily leaderboard email.
 
     Returns:
     {
         "metrics": {
             "ytd": {"Sales YTD": str, "Growth": str, "Prior Year YTD": str},
-            "kpi": {"Sales/MTD": str, "Calls/MTD": str,
-                    "Victories/MTD": str, "Opportunities/MTD": str},
-        },
-        "headers": [str, ...],
-        "rows": [
-            {
-                "Sales Rep": str,
-                "Monthly Target": str,
-                "MTD Target": str,  # dollar value e.g. "$125,806"
-                "Booked Sales": str,
-                "% of Target": str,
-                "Submitted Sales": str,
+            "kpi": {
+                "Sales Today": str, "Sales/MTD": str,
+                "Calls Today": str, "Calls/MTD": str,
+                "Victories Today": str, "Victories/MTD": str,
+                "Opps Today": str, "Opportunities/MTD": str,
             },
-            ...
-        ],
+        },
+        "headers": [str × 6],
+        "rows": [{Sales Rep, Monthly Target, MTD Target, MTD Target_flag,
+                  Booked Sales, % of Target, Submitted Sales}, ...],
     }
     """
     soup = BeautifulSoup(html_body, "lxml")
 
-    ytd = _extract_ytd_summary(soup)
-    kpi = _extract_kpi_block(soup)
-    headers, rows = _extract_targets_table(soup)
+    ytd_cells = _find_ytd_table(soup)
+    kpi_cells = _find_kpi_table(soup)
+    targets_cells = _find_targets_table(soup)
 
-    return {
-        "metrics": {"ytd": ytd, "kpi": kpi},
-        "headers": headers,
-        "rows": rows,
-    }
+    ytd = _parse_ytd(ytd_cells) if ytd_cells else {}
+    kpi = _parse_kpi(kpi_cells) if kpi_cells else {}
+    headers, rows = _parse_targets(targets_cells) if targets_cells else ([], [])
+
+    return {"metrics": {"ytd": ytd, "kpi": kpi}, "headers": headers, "rows": rows}
