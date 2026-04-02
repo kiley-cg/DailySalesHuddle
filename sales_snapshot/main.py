@@ -59,6 +59,7 @@ log = logging.getLogger(__name__)
 import gmail_watcher
 import table_parser
 import renderer
+import gcs_uploader
 import optisigns_client
 
 # ---------------------------------------------------------------------------
@@ -126,9 +127,13 @@ def run_pipeline(html_body: str):
     png_path = renderer.render(data, CFG)
     log.info("PNG saved: %s", png_path)
 
-    # Step 4: Push to OptiSigns
+    # Step 4: Upload to GCS then push to OptiSigns
+    log.info("Uploading PNG to GCS…")
+    public_url = gcs_uploader.upload_png(png_path, CFG)
+    log.info("GCS public URL: %s", public_url)
+
     log.info("Pushing to OptiSigns…")
-    asset_id = optisigns_client.push_to_optisigns(png_path, CFG)
+    asset_id = optisigns_client.push_to_optisigns(png_path, CFG, public_url=public_url)
     log.info("OptiSigns asset _id: %s", asset_id)
 
     # Step 5: Notify

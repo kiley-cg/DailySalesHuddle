@@ -68,50 +68,13 @@ def _gql(query: str, variables: dict | None = None) -> dict:
 # Step 1 — Upload asset
 # ---------------------------------------------------------------------------
 
-def upload_asset(png_path: str, asset_name: str) -> str:
+def register_asset(public_url: str, asset_name: str) -> str:
     """
-    Upload a PNG file to OptiSigns media library.
+    Register a publicly-hosted PNG with OptiSigns media library via webLink.
     Returns the new asset _id.
     """
-    log.info("Uploading asset '%s' from %s", asset_name, png_path)
+    log.info("Registering asset '%s' url=%s", asset_name, public_url)
 
-    # Step 1a: get pre-signed upload options
-    # getFileUploadOptions(payload: UpdateObjectInput!) returns a JSONObject scalar
-    query = """
-    query GetFileUploadOptions($payload: UpdateObjectInput!) {
-      getFileUploadOptions(payload: $payload)
-    }
-    """
-    data = _gql(query, {"payload": {"fileTypes": ["image/png"]}})
-    upload_opts = data["getFileUploadOptions"]
-    log.info("getFileUploadOptions response: %s", upload_opts)
-    upload_url = upload_opts["uploadUrl"]
-    file_url = upload_opts["fileUrl"]
-    # fields may be a dict of extra form fields for S3 multipart, or null
-    fields = upload_opts.get("fields") or {}
-
-    log.info("Got upload URL, fileUrl=%s", file_url)
-
-    # Step 1b: PUT/POST the PNG to the pre-signed URL
-    # If there are extra fields it's a multipart POST (S3), otherwise a plain PUT
-    if fields:
-        with open(png_path, "rb") as f:
-            form_data = {k: (None, v) for k, v in fields.items()}
-            form_data["file"] = (asset_name, f, "image/png")
-            put_resp = requests.post(upload_url, files=form_data, timeout=60)
-    else:
-        with open(png_path, "rb") as f:
-            put_resp = requests.put(
-                upload_url,
-                data=f,
-                headers={"Content-Type": "image/png"},
-                timeout=60,
-            )
-    put_resp.raise_for_status()
-    log.info("PNG uploaded successfully")
-
-    # Step 1c: register the asset in OptiSigns library
-    # AssetInput fields confirmed via introspection
     mutation = """
     mutation SaveAsset($payload: AssetInput!) {
       saveAsset(payload: $payload) {
@@ -120,18 +83,17 @@ def upload_asset(png_path: str, asset_name: str) -> str:
       }
     }
     """
-    file_size = os.path.getsize(png_path)
     asset_payload = {
         "type": "image",
         "fileType": "image/png",
         "originalFileName": asset_name,
         "originalFileExtension": "png",
-        "returnedUrl": file_url,
-        "fileSize": file_size,
+        "webLink": public_url,
+        "webType": "image",
     }
-    confirm_data = _gql(mutation, {"payload": asset_payload})
-    asset_id = confirm_data["saveAsset"]["_id"]
-    log.info("Asset saved: _id=%s name='%s'", asset_id, asset_name)
+    data = _gql(mutation, {"payload": asset_payload})
+    asset_id = data["saveAsset"]["_id"]
+    log.info("Asset registered: _id=%s", asset_id)
     return asset_id
 
 
@@ -328,22 +290,26 @@ def delete_old_snapshots(today_asset_id: str):
 # Public API — full update sequence
 # ---------------------------------------------------------------------------
 
-def push_to_optisigns(png_path: str, cfg: dict) -> str:
+def push_to_optisigns(png_path: str, cfg: dict, public_url: str | None = None) -> str:
     """
     Full sequence:
-      1. Upload PNG as 'Sales Snapshot YYYY-MM-DD'
+      1. Register the GCS-hosted PNG as an OptiSigns asset
       2. Find the target screen
       3. Update Main Left zone (or push directly)
-      4. Delete old snapshots
+      4. Delete old OptiSigns asset records
 
+    public_url: the GCS public URL returned by gcs_uploader.upload_png()
     Returns the new asset _id.
     """
     today = date.today().strftime("%Y-%m-%d")
     asset_name = f"Sales Snapshot {today}"
-    screen_name = cfg.get("optisigns_screen_name", "Sales Huddle")
+    screen_name = cfg.get("optisigns_screen_name", "CG Optisign Player")
     zone_name = cfg.get("optisigns_zone_name", "Main Left")
 
-    asset_id = upload_asset(png_path, asset_name)
+    if not public_url:
+        raise ValueError("public_url is required (GCS public URL of the PNG)")
+
+    asset_id = register_asset(public_url, asset_name)
     device = find_screen(screen_name)
     update_zone_asset(device, zone_name, asset_id)
     delete_old_snapshots(asset_id)
@@ -451,12 +417,17 @@ if __name__ == "__main__":
             print(f"PNG not found: {png}")
             print("Usage: python optisigns_client.py test-upload [path/to/file.png]")
             sys.exit(1)
-        print(f"Testing full upload+push with {png}…")
+        print(f"Testing full GCS upload + OptiSigns push with {png}…")
         import yaml
+        import gcs_uploader
         with open("config.yaml") as f:
             cfg = yaml.safe_load(f)
         try:
-            asset_id = push_to_optisigns(png, cfg)
+            print("Step 1: Uploading to GCS…")
+            public_url = gcs_uploader.upload_png(png, cfg)
+            print(f"  GCS URL: {public_url}")
+            print("Step 2: Registering + pushing to OptiSigns…")
+            asset_id = push_to_optisigns(png, cfg, public_url=public_url)
             print(f"\nSUCCESS — asset _id: {asset_id}")
             print("Check your OptiSigns screen — it should now show the PNG.")
         except Exception as exc:

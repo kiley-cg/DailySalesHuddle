@@ -21,6 +21,8 @@ brand:
 
 optisigns_screen_name: "CG Optisign Player"
 optisigns_zone_name: "Main Left"
+gcs_bucket: "cg-sales-snapshot"
+gcs_credentials: "gcs_credentials.json"
 canvas_width: 1152
 canvas_height: 1080
 output_folder: "output"
